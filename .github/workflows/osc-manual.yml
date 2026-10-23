@@ -1,0 +1,216 @@
+name: osc-manual
+
+# Fork-only exact-ref validation. This file is intentionally not sent upstream.
+# Mirrors upstream ci.yml's per-PR core checks on any target ref: the blocking
+# lint gates (workflow-check, format-check, lint), the fast critical-path
+# regressions, and the package suite with upstream's exact invocation. A
+# dispatch has no diff base, so the introduced-commit-message validation is not
+# replicated (upstream also skips it on workflow_dispatch). Loudly skipped on
+# this fork dispatch: the 3-OS first-run legs, browser-e2e, focus-e2e,
+# focus-pty-macos, telemetry-collector-e2e, postgres-memory-retrieval, the
+# wheel build/typing verification, example compilation, and the SophiaGraph
+# report. The closing step of each job prints that skip.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "Branch, tag, or SHA of this fork to test"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: osc-manual-openminion-${{ inputs.target_ref }}
+  cancel-in-progress: true
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      commit: ${{ steps.pin.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Nitjsefnie-OSC/openminion
+          ref: ${{ inputs.target_ref }}
+          persist-credentials: false
+      - id: pin
+        run: |
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Tested commit: $(git rev-parse HEAD) (resolved from target_ref '${{ inputs.target_ref }}')"
+
+  lint:
+    name: Lint gates (ubuntu, 3.11)
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Nitjsefnie-OSC/openminion
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - name: Prepare isolated runtime roots
+        run: |
+          {
+            echo "OPENMINION_HOME=$RUNNER_TEMP/openminion-home"
+            echo "OPENMINION_DATA_ROOT=$RUNNER_TEMP/openminion-data"
+            echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/openminion-pycache"
+          } >> "$GITHUB_ENV"
+          mkdir -p \
+            "$RUNNER_TEMP/openminion-home" \
+            "$RUNNER_TEMP/openminion-data" \
+            "$RUNNER_TEMP/openminion-pycache"
+      - name: Prepare lint workspace
+        shell: bash
+        run: |
+          mkdir -p .deps
+          [[ -d .deps/openminion-eval ]] || git clone --depth 1 --branch dev https://github.com/openminion/openminion-eval .deps/openminion-eval
+      - name: Bootstrap repo venv
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/bin/python3.11 -m pip install --upgrade pip setuptools wheel
+          .venv/bin/python3.11 -m pip install -e ".[dev]"
+      - name: Run blocking lint gate
+        run: |
+          make workflow-check
+          make format-check
+          make lint
+      - name: Scope statement
+        if: always()
+        run: |
+          echo "osc-manual ran the per-PR core lint set (workflow-check, format-check, lint) on one ubuntu runner."
+          echo "Loudly skipped on this fork dispatch: introduced-commit-message validation (upstream also skips it on workflow_dispatch), the windows/macOS legs, browser-e2e, focus-e2e, focus-pty-macos, telemetry-collector-e2e, postgres-memory-retrieval, and the wheel/typing/example steps of the test job."
+
+  critical-path:
+    name: Critical-path regressions (ubuntu, 3.11)
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Nitjsefnie-OSC/openminion
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+      - name: Set up Python 3.11
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - name: Prepare isolated runtime roots
+        run: |
+          {
+            echo "OPENMINION_HOME=$RUNNER_TEMP/openminion-home"
+            echo "OPENMINION_DATA_ROOT=$RUNNER_TEMP/openminion-data"
+            echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/openminion-pycache"
+          } >> "$GITHUB_ENV"
+          mkdir -p \
+            "$RUNNER_TEMP/openminion-home" \
+            "$RUNNER_TEMP/openminion-data" \
+            "$RUNNER_TEMP/openminion-pycache"
+      - name: Bootstrap repo venv
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/bin/python3.11 -m pip install --upgrade pip setuptools wheel
+          .venv/bin/python3.11 -m pip install -e ".[dev]"
+      - name: Run fast critical-path regressions
+        run: make test-critical
+
+  test:
+    name: Package suite (3.11) / CLI smoke (3.12)
+    needs: resolve
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+      fail-fast: false
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Nitjsefnie-OSC/openminion
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+      - name: Prepare isolated runtime roots
+        run: |
+          {
+            echo "OPENMINION_HOME=$RUNNER_TEMP/openminion-home"
+            echo "OPENMINION_DATA_ROOT=$RUNNER_TEMP/openminion-data"
+            echo "PYTHONPYCACHEPREFIX=$RUNNER_TEMP/openminion-pycache"
+          } >> "$GITHUB_ENV"
+          mkdir -p \
+            "$RUNNER_TEMP/openminion-home" \
+            "$RUNNER_TEMP/openminion-data" \
+            "$RUNNER_TEMP/openminion-pycache"
+      - name: Install code-search test dependency (3.11)
+        if: matrix.python-version == '3.11'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ripgrep
+      - name: Bootstrap repo venv (3.11 package suite)
+        if: matrix.python-version == '3.11'
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/bin/python3.11 -m pip install --upgrade pip setuptools wheel
+          .venv/bin/python3.11 -m pip install -e ".[dev,viewer,otel]"
+      - name: Run package-owned regression suite (3.11)
+        if: matrix.python-version == '3.11'
+        run: make test-ci
+      - name: Install dependencies (3.12 smoke)
+        if: matrix.python-version == '3.12'
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -e ".[dev]"
+      - name: Run standalone CLI smoke (3.12)
+        if: matrix.python-version == '3.12'
+        shell: bash
+        run: |
+          tmpdir="$(mktemp -d)"
+          config="$tmpdir/config.json"
+          export OPENMINION_HOME="$tmpdir/home"
+          export OPENMINION_DATA_ROOT="$OPENMINION_HOME/.openminion"
+          mkdir -p "$OPENMINION_HOME"
+          python -m openminion --help >/dev/null
+          python - <<'PY'
+          import openminion
+          from openminion import APIRuntime, Agent, OpenMinionConfig, tool
+          from openminion.api import (
+              RuntimeTurnHandle,
+              TurnChunk,
+              TurnResponse,
+              dispatch_request,
+          )
+          print(openminion.__version__)
+          print(
+              APIRuntime.__name__,
+              Agent.__name__,
+              OpenMinionConfig.__name__,
+              RuntimeTurnHandle.__name__,
+              TurnResponse.__name__,
+              callable(tool),
+              callable(dispatch_request),
+          )
+          PY
+      - name: Scope statement
+        if: always()
+        run: |
+          echo "osc-manual ran the per-PR core: package suite (make test-ci, 3.11) and the standalone CLI smoke (3.12)."
+          echo "Loudly skipped on this fork dispatch: the public API import smoke, wheel build/typing verification, example compilation, and the SophiaGraph report."
